@@ -200,6 +200,10 @@ app.get("/api/deposit/status", auth, async (req, res) => {
 });
 
 // ---------- IPN webhook ----------
+app.get("/api/webhook", (req, res) => {
+  res.json({ ok: true, hint: "NOWPayments must POST here. IPN URL should be PUBLIC_URL/api/webhook" });
+});
+
 app.post("/api/webhook", (req, res) => {
   try {
     // Optional HMAC verification
