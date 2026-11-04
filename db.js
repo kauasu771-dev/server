@@ -16,11 +16,6 @@ function save() {
   fs.writeFileSync(DB_PATH, Buffer.from(data));
 }
 
-function run(sql, params = []) {
-  db.run(sql, params);
-  save();
-}
-
 function get(sql, params = []) {
   const stmt = db.prepare(sql);
   stmt.bind(params);
@@ -42,7 +37,6 @@ function all(sql, params = []) {
   return rows;
 }
 
-/** better-sqlite3-like helpers used by server.js */
 function prepare(sql) {
   return {
     run(...params) {
@@ -99,6 +93,7 @@ CREATE TABLE IF NOT EXISTS payments (
   payment_id TEXT,
   amount REAL NOT NULL,
   status TEXT NOT NULL DEFAULT 'waiting',
+  kind TEXT NOT NULL DEFAULT 'deposit',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -112,12 +107,10 @@ CREATE TABLE IF NOT EXISTS ledger (
   created_at INTEGER NOT NULL
 );
 `);
+  try { db.run("ALTER TABLE payments ADD COLUMN kind TEXT DEFAULT 'deposit'"); } catch (e) {}
   save();
 
-  return {
-    prepare,
-    exec: (sql) => { db.run(sql); save(); }
-  };
+  return { prepare, exec: (sql) => { db.run(sql); save(); } };
 }
 
 module.exports = { init };
