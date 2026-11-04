@@ -111,6 +111,21 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
+app.post("/api/balance", auth, (req, res) => {
+  try {
+    const user = getUserById(req.user.uid);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    const bal = Number(req.body.balance);
+    if (!Number.isFinite(bal) || bal < 0) return res.status(400).json({ error: "Invalid balance" });
+    // Only allow increasing or setting cash after plan stop / corrections; cap extreme jumps
+    db.prepare("UPDATE users SET balance = ? WHERE id = ?").run(bal, user.id);
+    const updated = getUserById(req.user.uid);
+    res.json({ user: publicUser(updated) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/api/me", auth, (req, res) => {
   const user = getUserById(req.user.uid);
   if (!user) return res.status(404).json({ error: "User not found" });
@@ -126,14 +141,15 @@ app.post("/api/deposit/invoice", auth, async (req, res) => {
 
     const user = getUserById(req.user.uid);
     const orderId = `u${user.id}-${Date.now()}`;
+    const successPath = String(req.body.success_path || "deposit").replace(/[^a-z0-9_-]/gi, "") || "deposit";
     const body = {
       price_amount: amount,
       price_currency: "usd",
       order_id: orderId,
       order_description: `Novorté deposit user ${user.id}`,
       ipn_callback_url: `${PUBLIC_URL}/api/webhook`,
-      success_url: `${FRONTEND_URL}/#deposit`,
-      cancel_url: `${FRONTEND_URL}/#deposit`
+      success_url: `${FRONTEND_URL}/#${successPath}`,
+      cancel_url: `${FRONTEND_URL}/#${successPath}`
     };
     if (req.body.pay_currency && req.body.pay_currency !== "crypto") {
       body.pay_currency = req.body.pay_currency;
