@@ -142,11 +142,14 @@ app.post("/api/deposit/invoice", auth, async (req, res) => {
     const user = getUserById(req.user.uid);
     const orderId = `u${user.id}-${Date.now()}`;
     const successPath = String(req.body.success_path || "deposit").replace(/[^a-z0-9_-]/gi, "") || "deposit";
+    const kind = String(req.body.kind || "deposit").toLowerCase() === "fee" ? "fee" : "deposit";
     const body = {
       price_amount: amount,
       price_currency: "usd",
       order_id: orderId,
-      order_description: `Novorté deposit user ${user.id}`,
+      order_description: kind === "fee"
+        ? `Novorté fee user ${user.id}`
+        : `Novorté deposit user ${user.id}`,
       ipn_callback_url: `${PUBLIC_URL}/api/webhook`,
       success_url: `${FRONTEND_URL}/#${successPath}`,
       cancel_url: `${FRONTEND_URL}/#${successPath}`
@@ -165,15 +168,16 @@ app.post("/api/deposit/invoice", auth, async (req, res) => {
 
     const now = Date.now();
     db.prepare(
-      `INSERT INTO payments (user_id, order_id, invoice_id, payment_id, amount, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'waiting', ?, ?)`
-    ).run(user.id, orderId, String(data.id || data.invoice_id || ""), data.payment_id ? String(data.payment_id) : null, amount, now, now);
+      `INSERT INTO payments (user_id, order_id, invoice_id, payment_id, amount, status, kind, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'waiting', ?, ?, ?)`
+    ).run(user.id, orderId, String(data.id || data.invoice_id || ""), data.payment_id ? String(data.payment_id) : null, amount, kind, now, now);
 
     res.json({
       order_id: orderId,
       invoice_id: data.id || data.invoice_id,
       invoice_url: data.invoice_url,
-      amount
+      amount,
+      kind
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -187,7 +191,13 @@ app.get("/api/deposit/status", auth, async (req, res) => {
     const row = db.prepare("SELECT * FROM payments WHERE order_id = ? AND user_id = ?").get(orderId, req.user.uid);
     if (!row) return res.status(404).json({ error: "Payment not found" });
     if (row.status === "finished") {
-      return res.json({ paid: true, status: "finished", amount: row.amount, user: publicUser(getUserById(req.user.uid)) });
+      return res.json({
+        paid: true,
+        status: "finished",
+        amount: row.amount,
+        kind: row.kind || "deposit",
+        user: publicUser(getUserById(req.user.uid))
+      });
     }
 
     // Ask NOWPayments for updates
@@ -202,9 +212,18 @@ app.get("/api/deposit/status", auth, async (req, res) => {
           .run(String(match.payment_id || ""), st, Date.now(), row.id);
         if (["finished", "confirmed", "sending", "partially_paid"].includes(st)) {
           const paidAmt = Number(match.price_amount || match.actually_paid || row.amount);
-          creditBalance(req.user.uid, paidAmt, `pay-${match.payment_id || orderId}`, "NOWPayments deposit");
+          const rowKind = String(row.kind || "deposit");
+          if (rowKind !== "fee") {
+            creditBalance(req.user.uid, paidAmt, `pay-${match.payment_id || orderId}`, "NOWPayments deposit");
+          }
           db.prepare("UPDATE payments SET status = 'finished', updated_at = ? WHERE id = ?").run(Date.now(), row.id);
-          return res.json({ paid: true, status: st, amount: paidAmt, user: publicUser(getUserById(req.user.uid)) });
+          return res.json({
+            paid: true,
+            status: st,
+            amount: paidAmt,
+            kind: rowKind,
+            user: publicUser(getUserById(req.user.uid))
+          });
         }
         return res.json({ paid: false, status: st });
       }
@@ -251,7 +270,12 @@ app.post("/api/webhook", (req, res) => {
 
     if (["finished", "confirmed", "sending", "partially_paid"].includes(status)) {
       const creditAmt = amount > 0 ? amount : row.amount;
-      creditBalance(row.user_id, creditAmt, `pay-${paymentId || orderId}`, "NOWPayments IPN deposit");
+      const rowKind = String(row.kind || "deposit");
+      if (rowKind !== "fee") {
+        creditBalance(row.user_id, creditAmt, `pay-${paymentId || orderId}`, "NOWPayments IPN deposit");
+      } else {
+        console.log("IPN fee paid — no deposit credit", orderId, creditAmt);
+      }
       db.prepare("UPDATE payments SET status = 'finished', updated_at = ? WHERE id = ?").run(Date.now(), row.id);
     }
 
@@ -278,6 +302,11 @@ initDb().then((database) => {
     console.log(`Webhook URL: ${PUBLIC_URL}/api/webhook`);
     if (!NOW_API_KEY) console.warn("WARNING: NOW_API_KEY empty");
   });
+}).catch((e) => {
+  console.error("DB init failed", e);
+  process.exit(1);
+});
+
 }).catch((e) => {
   console.error("DB init failed", e);
   process.exit(1);
