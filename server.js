@@ -200,7 +200,11 @@ app.get("/api/deposit/status", auth, async (req, res) => {
     const row = db.prepare("SELECT * FROM payments WHERE order_id = ? AND user_id = ?").get(orderId, req.user.uid);
     if (!row) return res.status(404).json({ error: "Payment not found" });
 
-    if (row.status === "finished") {
+    const rowSt = String(row.status || "").toLowerCase();
+    if (rowSt === "finished" || rowSt === "confirmed" || rowSt === "sending" || rowSt === "partially_paid") {
+      if (rowSt !== "finished") {
+        db.prepare("UPDATE payments SET status = 'finished', updated_at = ? WHERE id = ?").run(Date.now(), row.id);
+      }
       return res.json({
         paid: true,
         status: "finished",
@@ -303,6 +307,10 @@ initDb().then(function (database) {
     console.log("Webhook URL: " + PUBLIC_URL + "/api/webhook");
     if (!NOW_API_KEY) console.warn("WARNING: NOW_API_KEY empty");
   });
+}).catch(function (e) {
+  console.error("DB init failed", e);
+  process.exit(1);
+});
 }).catch(function (e) {
   console.error("DB init failed", e);
   process.exit(1);
