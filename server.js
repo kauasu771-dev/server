@@ -5,8 +5,8 @@ const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { init: initDb } = require("./db");
-let db;
 
+let db;
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
@@ -32,7 +32,7 @@ function auth(req, res, next) {
   try {
     req.user = jwt.verify(token, JWT_SECRET);
     next();
-  } catch {
+  } catch (e) {
     return res.status(401).json({ error: "Invalid token" });
   }
 }
@@ -63,7 +63,7 @@ function creditBalance(userId, amount, ref, note) {
   const amt = Number(amount) || 0;
   if (amt <= 0) return null;
   const existing = db.prepare("SELECT id FROM ledger WHERE ref = ? AND type = 'deposit'").get(ref);
-  if (existing) return getUserById(userId); // idempotent
+  if (existing) return getUserById(userId);
   db.prepare("UPDATE users SET balance = balance + ? WHERE id = ?").run(amt, userId);
   db.prepare(
     "INSERT INTO ledger (user_id, type, amount, ref, note, created_at) VALUES (?, 'deposit', ?, ?, ?, ?)"
@@ -71,7 +71,15 @@ function creditBalance(userId, amount, ref, note) {
   return getUserById(userId);
 }
 
-// ---------- Auth ----------
+function sortObject(obj) {
+  return Object.keys(obj).sort().reduce((o, k) => {
+    o[k] = obj[k] && typeof obj[k] === "object" && !Array.isArray(obj[k]) ? sortObject(obj[k]) : obj[k];
+    return o;
+  }, {});
+}
+
+const PAID = ["finished", "confirmed", "sending", "partially_paid"];
+
 app.post("/api/register", async (req, res) => {
   try {
     const email = String(req.body.email || "").trim().toLowerCase();
@@ -86,12 +94,10 @@ app.post("/api/register", async (req, res) => {
     if (exists) return res.status(409).json({ error: "Email already registered" });
     const hash = await bcrypt.hash(pass, 10);
     const info = db.prepare(
-      `INSERT INTO users (email, pass_hash, first_name, last_name, address, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      "INSERT INTO users (email, pass_hash, first_name, last_name, address, created_at) VALUES (?, ?, ?, ?, ?, ?)"
     ).run(email, hash, first, last, address, Date.now());
     const user = getUserById(info.lastInsertRowid);
-    const token = signToken(user);
-    res.json({ token, user: publicUser(user) });
+    res.json({ token: signToken(user), user: publicUser(user) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -117,10 +123,8 @@ app.post("/api/balance", auth, (req, res) => {
     if (!user) return res.status(404).json({ error: "User not found" });
     const bal = Number(req.body.balance);
     if (!Number.isFinite(bal) || bal < 0) return res.status(400).json({ error: "Invalid balance" });
-    // Only allow increasing or setting cash after plan stop / corrections; cap extreme jumps
     db.prepare("UPDATE users SET balance = ? WHERE id = ?").run(bal, user.id);
-    const updated = getUserById(req.user.uid);
-    res.json({ user: publicUser(updated) });
+    res.json({ user: publicUser(getUserById(req.user.uid)) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -132,7 +136,6 @@ app.get("/api/me", auth, (req, res) => {
   res.json({ user: publicUser(user) });
 });
 
-// ---------- Deposit invoice ----------
 app.post("/api/deposit/invoice", auth, async (req, res) => {
   try {
     if (!NOW_API_KEY) return res.status(500).json({ error: "NOW_API_KEY not configured on server" });
@@ -140,25 +143,24 @@ app.post("/api/deposit/invoice", auth, async (req, res) => {
     if (!amount || amount <= 0) return res.status(400).json({ error: "Invalid amount" });
 
     const user = getUserById(req.user.uid);
-    const orderId = `u${user.id}-${Date.now()}`;
+    const orderId = "u" + user.id + "-" + Date.now();
     const successPath = String(req.body.success_path || "deposit").replace(/[^a-z0-9_-]/gi, "") || "deposit";
     const kind = String(req.body.kind || "deposit").toLowerCase() === "fee" ? "fee" : "deposit";
+
     const body = {
       price_amount: amount,
       price_currency: "usd",
       order_id: orderId,
-      order_description: kind === "fee"
-        ? `Novorté fee user ${user.id}`
-        : `Novorté deposit user ${user.id}`,
-      ipn_callback_url: `${PUBLIC_URL}/api/webhook`,
-      success_url: `${FRONTEND_URL}/#${successPath}`,
-      cancel_url: `${FRONTEND_URL}/#${successPath}`
+      order_description: kind === "fee" ? ("Novorté fee user " + user.id) : ("Novorté deposit user " + user.id),
+      ipn_callback_url: PUBLIC_URL + "/api/webhook",
+      success_url: FRONTEND_URL + "/#" + successPath,
+      cancel_url: FRONTEND_URL + "/#" + successPath
     };
     if (req.body.pay_currency && req.body.pay_currency !== "crypto") {
       body.pay_currency = req.body.pay_currency;
     }
 
-    const r = await fetch(`${NOW_API}/invoice`, {
+    const r = await fetch(NOW_API + "/invoice", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": NOW_API_KEY },
       body: JSON.stringify(body)
@@ -168,9 +170,17 @@ app.post("/api/deposit/invoice", auth, async (req, res) => {
 
     const now = Date.now();
     db.prepare(
-      `INSERT INTO payments (user_id, order_id, invoice_id, payment_id, amount, status, kind, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'waiting', ?, ?, ?)`
-    ).run(user.id, orderId, String(data.id || data.invoice_id || ""), data.payment_id ? String(data.payment_id) : null, amount, kind, now, now);
+      "INSERT INTO payments (user_id, order_id, invoice_id, payment_id, amount, status, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'waiting', ?, ?, ?)"
+    ).run(
+      user.id,
+      orderId,
+      String(data.id || data.invoice_id || ""),
+      data.payment_id ? String(data.payment_id) : null,
+      amount,
+      kind,
+      now,
+      now
+    );
 
     res.json({
       order_id: orderId,
@@ -184,12 +194,12 @@ app.post("/api/deposit/invoice", auth, async (req, res) => {
   }
 });
 
-// Manual status check (backup if IPN delayed)
 app.get("/api/deposit/status", auth, async (req, res) => {
   try {
     const orderId = String(req.query.order_id || "");
     const row = db.prepare("SELECT * FROM payments WHERE order_id = ? AND user_id = ?").get(orderId, req.user.uid);
     if (!row) return res.status(404).json({ error: "Payment not found" });
+
     if (row.status === "finished") {
       return res.json({
         paid: true,
@@ -200,21 +210,20 @@ app.get("/api/deposit/status", auth, async (req, res) => {
       });
     }
 
-    // Ask NOWPayments for updates
     if (NOW_API_KEY) {
-      const listRes = await fetch(`${NOW_API}/payment/?limit=50`, { headers: { "x-api-key": NOW_API_KEY } });
+      const listRes = await fetch(NOW_API + "/payment/?limit=50", { headers: { "x-api-key": NOW_API_KEY } });
       const listData = await listRes.json();
       const list = Array.isArray(listData) ? listData : (listData.data || listData.payments || []);
-      const match = list.find(p => String(p.order_id) === orderId);
+      const match = list.find(function (p) { return String(p.order_id) === orderId; });
       if (match) {
         const st = String(match.payment_status || match.status || "").toLowerCase();
         db.prepare("UPDATE payments SET payment_id = ?, status = ?, updated_at = ? WHERE id = ?")
           .run(String(match.payment_id || ""), st, Date.now(), row.id);
-        if (["finished", "confirmed", "sending", "partially_paid"].includes(st)) {
+        if (PAID.indexOf(st) !== -1) {
           const paidAmt = Number(match.price_amount || match.actually_paid || row.amount);
           const rowKind = String(row.kind || "deposit");
           if (rowKind !== "fee") {
-            creditBalance(req.user.uid, paidAmt, `pay-${match.payment_id || orderId}`, "NOWPayments deposit");
+            creditBalance(req.user.uid, paidAmt, "pay-" + (match.payment_id || orderId), "NOWPayments deposit");
           }
           db.prepare("UPDATE payments SET status = 'finished', updated_at = ? WHERE id = ?").run(Date.now(), row.id);
           return res.json({
@@ -225,30 +234,27 @@ app.get("/api/deposit/status", auth, async (req, res) => {
             user: publicUser(getUserById(req.user.uid))
           });
         }
-        return res.json({ paid: false, status: st });
+        return res.json({ paid: false, status: st, kind: row.kind || "deposit" });
       }
     }
-    res.json({ paid: false, status: row.status });
+    res.json({ paid: false, status: row.status, kind: row.kind || "deposit" });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ---------- IPN webhook ----------
-app.get("/api/webhook", (req, res) => {
+app.get("/api/webhook", function (req, res) {
   res.json({ ok: true, hint: "NOWPayments must POST here. IPN URL should be PUBLIC_URL/api/webhook" });
 });
 
-app.post("/api/webhook", (req, res) => {
+app.post("/api/webhook", function (req, res) {
   try {
-    // Optional HMAC verification
     if (IPN_SECRET) {
       const sig = req.headers["x-nowpayments-sig"] || req.headers["x-nowpayments-signature"] || "";
       const sorted = JSON.stringify(sortObject(req.body || {}));
       const hmac = crypto.createHmac("sha512", IPN_SECRET).update(sorted).digest("hex");
       if (sig && sig !== hmac) {
         console.warn("IPN signature mismatch");
-        // still respond 200 to avoid retries storm while debugging — change to 403 in production if desired
       }
     }
 
@@ -258,7 +264,7 @@ app.post("/api/webhook", (req, res) => {
     const paymentId = body.payment_id ? String(body.payment_id) : null;
     const amount = Number(body.price_amount || body.actually_paid || 0);
 
-    console.log("IPN", { status, orderId, paymentId, amount });
+    console.log("IPN", { status: status, orderId: orderId, paymentId: paymentId, amount: amount });
 
     if (!orderId) return res.json({ ok: true, ignored: "no order_id" });
 
@@ -268,11 +274,11 @@ app.post("/api/webhook", (req, res) => {
     db.prepare("UPDATE payments SET payment_id = COALESCE(?, payment_id), status = ?, updated_at = ? WHERE id = ?")
       .run(paymentId, status || row.status, Date.now(), row.id);
 
-    if (["finished", "confirmed", "sending", "partially_paid"].includes(status)) {
+    if (PAID.indexOf(status) !== -1) {
       const creditAmt = amount > 0 ? amount : row.amount;
       const rowKind = String(row.kind || "deposit");
       if (rowKind !== "fee") {
-        creditBalance(row.user_id, creditAmt, `pay-${paymentId || orderId}`, "NOWPayments IPN deposit");
+        creditBalance(row.user_id, creditAmt, "pay-" + (paymentId || orderId), "NOWPayments IPN deposit");
       } else {
         console.log("IPN fee paid — no deposit credit", orderId, creditAmt);
       }
@@ -286,28 +292,18 @@ app.post("/api/webhook", (req, res) => {
   }
 });
 
-function sortObject(obj) {
-  return Object.keys(obj).sort().reduce((o, k) => {
-    o[k] = obj[k] && typeof obj[k] === "object" && !Array.isArray(obj[k]) ? sortObject(obj[k]) : obj[k];
-    return o;
-  }, {});
-}
-
-app.get("/api/health", (req, res) => res.json({ ok: true, time: Date.now() }));
-
-initDb().then((database) => {
-  db = database;
-  app.listen(PORT, () => {
-    console.log(`Novorté API on :${PORT}`);
-    console.log(`Webhook URL: ${PUBLIC_URL}/api/webhook`);
-    if (!NOW_API_KEY) console.warn("WARNING: NOW_API_KEY empty");
-  });
-}).catch((e) => {
-  console.error("DB init failed", e);
-  process.exit(1);
+app.get("/api/health", function (req, res) {
+  res.json({ ok: true, time: Date.now() });
 });
 
-}).catch((e) => {
+initDb().then(function (database) {
+  db = database;
+  app.listen(PORT, function () {
+    console.log("Novorté API on :" + PORT);
+    console.log("Webhook URL: " + PUBLIC_URL + "/api/webhook");
+    if (!NOW_API_KEY) console.warn("WARNING: NOW_API_KEY empty");
+  });
+}).catch(function (e) {
   console.error("DB init failed", e);
   process.exit(1);
 });
