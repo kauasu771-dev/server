@@ -114,8 +114,3 @@ CREATE TABLE IF NOT EXISTS ledger (
 }
 
 module.exports = { init };
-
-  return { prepare, exec: (sql) => { db.run(sql); save(); } };
-}
-
-module.exports = { init };
