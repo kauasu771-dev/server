@@ -311,7 +311,3 @@ initDb().then(function (database) {
   console.error("DB init failed", e);
   process.exit(1);
 });
-}).catch(function (e) {
-  console.error("DB init failed", e);
-  process.exit(1);
-});
