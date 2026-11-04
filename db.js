@@ -112,5 +112,4 @@ CREATE TABLE IF NOT EXISTS ledger (
 
   return { prepare, exec: (sql) => { db.run(sql); save(); } };
 }
-
 module.exports = { init };
