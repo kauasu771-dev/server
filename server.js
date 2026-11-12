@@ -139,7 +139,7 @@ app.get("/api/me", auth, (req, res) => {
 app.post("/api/deposit/invoice", auth, async (req, res) => {
   try {
     if (!NOW_API_KEY) return res.status(500).json({ error: "NOW_API_KEY not configured on server" });
-    const amount = Number(req.body.amount);
+    const amount = Math.round(Number(req.body.amount) * 100) / 100;
     if (!amount || amount <= 0) return res.status(400).json({ error: "Invalid amount" });
 
     const user = getUserById(req.user.uid);
